@@ -1,0 +1,205 @@
+Description: >
+    This template is used to deploys irods in AWS Regions (us-east-1, us-east-2, us-west-1, us-west-2)
+#Parameters to be passed by user at the time of stack launch
+Parameters:
+  DiskSize:
+    Type: Number
+    Default: 50
+    ConstraintDescription: must be within a range of 10GBs to 500GBs
+    Description: Size of the D-Drive
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: number of CPU's and RAM
+  KeyName:
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: 'AWS::EC2::KeyPair::KeyName'
+  Subnet:
+    Type: List<AWS::EC2::Subnet::Id>
+    ConstraintDescription: must be the Subnet of the VPC you choosed.
+    Description: Subnet ID of an the VPC you choosed.
+  SecurityGroupID:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Security Group for instance
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    ConstraintDescription: must be the ID of an existing VPC.
+    Description: ID of an existing VPC
+#########################################################################################
+# DO NOT EDIT BELOW HERE                                                                #
+# ... unless you really know what you're doing                                          #
+#Mapping for Ubuntu AMI Ids                                                             #
+#########################################################################################
+Mappings: 
+  RegionMap: 
+    us-east-1: 
+      "32": "ami-9f086de0"
+    us-east-2: 
+      "32": "ami-7d132e18"
+    us-west-1: 
+      "32": "ami-2cbda54c"
+    us-west-2: 
+      "32": "ami-c59ce2bd"
+#########################################################################################
+# DO NOT EDIT BELOW HERE                                                                #
+# ... unless you really know what you're doing                                          #
+#                                                                                       #
+# From here on down is the iRods model                                                  #
+#########################################################################################
+Resources:
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          LinuxBaseline:
+          - setup_updater
+        setup_updater:
+          files:
+            /home/ubuntu/iinit.sh:
+              content:
+                Fn::Join:
+                - "\n"
+                - - "#!/bin/bash"
+                  - "export PATH=/opt/iRODS/clients/icommands/bin/:$PATH"
+                  - "mkdir ~/.irods/"
+                  - "sudo cp /var/lib/irods/.irods/irods_environment.json ~/.irods/"
+                  - "sudo chown -R ubuntu:ubuntu ~/.irods/"
+                  - "exit"
+              group: root
+              mode: '755'
+              owner: root
+            /home/ubuntu/psql.sh:
+              content:
+                Fn::Join:
+                - "\n"
+                - - "#!/bin/bash"
+                  - "sudo -u postgres psql --command 'CREATE DATABASE \"ICAT\";' "
+                  - "sudo -u postgres psql --command \"CREATE USER irods WITH PASSWORD 'testpassword';\" "
+                  - "sudo -u postgres psql --command 'GRANT ALL PRIVILEGES ON DATABASE \"ICAT\" to irods;' "
+                  - "sudo -u postgres psql --command '\\l' "
+                  - "exit"
+              group: root
+              mode: '755'
+              owner: root
+            /home/ubuntu/irods.input:
+              content:
+                Fn::Join:
+                - "\n"
+                - - "irods" #iCAT confign #username
+                  - "irods" #group
+                  - ""
+                  - "1"
+                  - "localhost" #host
+                  - "5432" #port
+                  - "ICAT" #database
+                  - "irods"
+                  - "y"
+                  - "testpassword" #password
+                  - ""
+                  - "tempZone" #Zone config (Resource server)
+                  - "1247" #port
+                  - "20000"
+                  - "20199"
+                  - "1248"
+                  - ""
+                  - "rods" #Admin username
+                  - "y"
+                  - "TEMPORARY_ZONE_KEY" #zone key
+                  - "32_byte_server_negotiation_key__"
+                  - "32_byte_server_control_plane_key"
+                  - "rods" #admin password
+                  - ""
+                  - ""
+                  - ""
+              group: root
+              mode: '400'
+              owner: root
+          commands:
+            00_update:
+              command: sudo apt-get update
+            01_depends:
+              command: sudo apt-get -y install git g++ make python-dev help2man unixodbc libfuse-dev libcurl4-gnutls-dev libbz2-dev zlib1g-dev libpam0g-dev libssl-dev libxml2-dev libkrb5-dev unixodbc-dev libjson-perl python-psutil python-jsonschema super python-exif odbc-postgresql
+            02_add_apt:
+              command: wget -qO - https://packages.irods.org/irods-signing-key.asc | sudo apt-key add -
+            03_update_package:
+              command: echo "deb [arch=amd64] https://packages.irods.org/apt/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/renci-irods.list
+            04_install_update:
+              command: sudo apt-get update
+            05_install_icat:
+              command: sudo apt-get -y install irods-server irods-server
+            06_posgresql:
+              command: sudo apt-get -y install postgresql
+            07_install_db:
+              command: ./home/ubuntu/psql.sh
+            08_install_plugin:
+              command: sudo apt-get -y install irods-server irods-database-plugin-postgres
+            09_install_s3_plugin:
+              command: sudo apt-get -y install irods-server irods-resource-plugin-s3
+            10_install_dev:
+              command: sudo apt-get -y install irods-server irods-dev
+            11_install_runtime:
+              command: sudo apt-get -y install irods-server irods-runtime
+            12_configure_irods:
+              command: sudo python /var/lib/irods/scripts/setup_irods.py < /home/ubuntu/irods.input
+            13_iinit:
+              command: ./home/ubuntu/iinit.sh
+    Properties:
+      BlockDeviceMappings:
+      - DeviceName: /dev/sdk
+        Ebs:
+          DeleteOnTermination: 'true'
+          Encrypted: 'true'
+          VolumeSize: {Ref: DiskSize}
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", '32']
+      InstanceType: !Ref InstanceType
+      KeyName: {Ref: KeyName}
+      SecurityGroups: !Ref SecurityGroupID
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ""
+          - - "#!/bin/bash -ex\n"
+            - "apt-get update\n"
+            - "apt-get -y install python-setuptools\n"
+            - "mkdir aws-cfn-bootstrap-latest\n"
+            - "curl https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz | tar xz -C aws-cfn-bootstrap-latest --strip-components 1\n"
+            - "easy_install aws-cfn-bootstrap-latest\n"
+            - "/usr/local/bin/cfn-init  --stack "
+            - {Ref: 'AWS::StackId'}
+            - " --resource LaunchConfig "
+            - "    --configsets LinuxBaseline"
+            - "    --region "
+            - {Ref: 'AWS::Region'}
+            - "\n"
+            - "/usr/local/bin/cfn-signal -e $? "
+            - "    --stack "
+            - {Ref: 'AWS::StackId'}
+            - "    --resource LaunchConfig "
+            - "    --region "
+            - {Ref: 'AWS::Region'}
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT90M
+        Count: '1'
+  WebServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref Subnet
+      LaunchConfigurationName:
+        Ref: LaunchConfig
+      MinSize: "1"
+      MaxSize: "5"
+      LoadBalancerNames:
+        - Ref: ElasticLoadBalancer
+
+  ElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      Subnets: !Ref Subnet
+      SecurityGroups: !Ref SecurityGroupID
+      Listeners:
+        - LoadBalancerPort: 80
+          InstancePort: 80
+          Protocol: HTTP
