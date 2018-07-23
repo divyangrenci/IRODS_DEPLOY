@@ -78,7 +78,7 @@ Resources:
                   - "irods" #group
                   - ""
                   - "2"
-                  - "testZone" #host
+                  - "tempZone" #host
                   - "localhost" #port
                   - "1247" #port
                   - "20000"
